@@ -137,9 +137,7 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     #endif
 
     while (t < T) {
-        #ifdef DEBUG
-        reportResult(cars, t);
-        #endif
+
             // Induce randomness
             // need to skip partition size * idx when omp this to ensure deterministic rng to car correspondence
         for (int i = 0; i < N; i++) {
@@ -204,6 +202,9 @@ void executeSimulation(Params params, std::vector<Car> cars) {
         }
         position_update(cars, lanes, L, N, speed_snapshot);
         t++;
+        #ifdef DEBUG
+        reportResult(cars, t);
+        #endif
     }
     // reportFinalResult(cars);
 }

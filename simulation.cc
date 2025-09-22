@@ -138,9 +138,6 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     #endif
 
     while (t < T) {
-        #ifdef DEBUG
-        reportResult(cars, t);
-        #endif
             // Induce randomness
             // need to skip partition size * idx when omp this to ensure deterministic rng to car correspondence
         for (int i = 0; i < N; i++) {
@@ -175,7 +172,7 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 if (force_acc[c.id]) {  // did not accelerate when permitted last round
                     force_acc[c.id] = 0;
                     speed_snapshot[c.id] = 1;
-                    accelerating[c.id] = 1;
+                    accelerating[c.id] = 0;
                     continue;
                 } 
                 if (ss[c.id]) {         // random start
@@ -210,8 +207,13 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             }
         }
         position_update(cars, lanes, L, N, speed_snapshot);
+        #ifdef DEBUG
+            reportResult(cars, t);
+        #endif
         t++;
     }
-    // reportFinalResult(cars);
+    #ifdef DEBUG
+        reportFinalResult(cars);
+    #endif
 }
 
