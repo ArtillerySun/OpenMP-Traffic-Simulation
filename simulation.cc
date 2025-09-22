@@ -126,7 +126,6 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     std::vector<char> dec(N, 0);
         // speed snapshot
     std::vector<int> speed_snapshot(N, 0);
-
         // build position and speed state vectors
     for (auto c : cars) {
         lanes[c.lane][c.position] = c.id;
