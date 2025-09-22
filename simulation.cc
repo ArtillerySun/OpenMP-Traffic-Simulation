@@ -61,7 +61,7 @@ bool decelerate(const std::vector<Car>& cars,const std::vector<int>& lane, const
         std::vector<int>& speed_snapshot, const int VMAX) {
     int p2 = find_next(lane, L, c.position);
     int d  = (p2 < 0) ? L : dist(L, c.position, p2);
-    int v2 = (p2 < 0) ? cars[lane[p2]].v : VMAX;
+    int v2 = (p2 < 0) ? VMAX : cars[lane[p2]].v; 
     int v1 = c.v;
     if (d <= v1) {
         if (v1 < v2 || v1 < 2) {
@@ -191,13 +191,15 @@ void executeSimulation(Params params, std::vector<Car> cars) {
         }
             // deterministic deceleration & acceleration
         for (auto c : cars) {
-                // skip deceleration if starting 
-            if (accelerating[c.id] || force_acc[c.id]) {
+            if (accelerating[c.id]) {  // only skip accel path for 1a
                 continue;
-            } 
-                // if not starting or not decelerated, accelerate
+            }
+                // allow deceleration even if there was a forced start this step
             if (!decelerate(cars, lanes[c.lane], c, L, speed_snapshot, VMAX)) {
-                accelerate(lanes[c.lane], c, L, speed_snapshot, VMAX);
+                    // Only accelerate if this car was NOT set by forced start earlier:
+                if (!force_acc[c.id]) { // forced start already assigned v=1
+                    accelerate(lanes[c.lane], c, L, speed_snapshot, VMAX);
+                }
             }
         }
             // random deceleration
