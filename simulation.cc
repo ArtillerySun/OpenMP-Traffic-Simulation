@@ -49,6 +49,56 @@ bool can_switch_lane(std::vector<Car>& cars, const Car& c, std::vector<std::vect
     return d2 < d3 && c.v >= d2 && lanes[c.lane^1][c.position] == -1 && d0 > cars[lanes[c.lane^1][c0]].v;
 }
 
+bool decelerate(std::vector<Car>& cars,std::vector<int>& lane, const Car& c, int L, 
+        std::vector<int>& speed_snapshot) {
+    int p2 = find_next(lane, L, c.position);
+    int c2 = lane[p2];
+    int d = dist(L, p2, c.position) <= c.v;
+    int v1 = c.v;
+    int v2 = cars[c2].v;
+    if (d <= v1) {
+        if (v1 < v2 || v1 < 2) {
+            speed_snapshot[c.id] = d - 1;
+            return true;
+        } else if (v1 >= v2 && v1 >= 2) {
+            speed_snapshot[c.id] = std::min(d - 1, v1 - 2);
+            return true;
+        } else {
+            return false;
+        }
+    }
+    if (v1 < d && d <= 2 * v1 && v1 >= v2) {
+        speed_snapshot[c.id] = v1 - std::floor((v1 - v2) / 2);
+        return true;
+    }
+    return false;
+}
+
+void accelerate(std::vector<Car>& cars,std::vector<int>& lane, const Car& c, int L, 
+        std::vector<int>& speed_snapshot, const int& VMAX) {
+    int p2 = find_next(lane, L, c.position);
+    int d = dist(L, p2, c.position) <= c.v;
+    int v1 = c.v;
+    speed_snapshot[c.id] = std::min(d - 1, std::min(v1 + 1, VMAX));
+}
+
+void position_update(std::vector<Car>& cars, std::vector<std::vector<int>>& lanes, const int& L, const int& N,
+        std::vector<int> speed_snapshot) {
+    for (int i = 0; i < N; i++) {
+            // compute new position
+        int new_position = (cars[i].position + speed_snapshot[i]) % L;
+            // update state vectors 
+                // lanes
+        if (speed_snapshot[i] > 0) {
+            lanes[cars[i].lane][cars[i].position] = -1;
+            lanes[cars[i].lane][new_position] = i;
+        }
+            // update car object 
+        cars[i].position = new_position;
+        cars[i].v = speed_snapshot[i];
+    }
+}
+
 void executeSimulation(Params params, std::vector<Car> cars) {
     const int N = params.n;
     const int L = params.L;
@@ -66,10 +116,13 @@ void executeSimulation(Params params, std::vector<Car> cars) {
         // centralized per iteration random decision making
     std::vector<char> ss(N, 0);
     std::vector<char> dec(N, 0);
+        // speed snapshot
+    std::vector<int> speed_snapshot(N, 0);
 
-        // build position state vectors
+        // build position and speed state vectors
     for (auto c : cars) {
         lanes[c.lane][c.position] = c.id;
+        speed_snapshot[c.id] = c.v;
     }
 
     #ifdef DEBUG
@@ -103,10 +156,28 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             }
         }
             // car wise determine start/dec/acc
-        for (int i = 0; i < N; i++) {
+        for (auto c : cars) {
                 // slow start
+            if (c.v == 0 && dist(L, c.position, (lanes[c.lane], L, c.position)) > 1) {
+                if (ss[c.id] || force_acc[c.id]) {
+                    accelerate(cars, lanes[c.lane], c, L, speed_snapshot, VMAX);
+                    force_acc[c.id] = 0;
+                } else { 
+                    force_acc[c.id] = 1;
+                }
+            }
+                // rule based deceleration
+            if (!force_acc[c.id] || !decelerate) {
+                accelerate(cars, lanes[c.lane], c, L, speed_snapshot, VMAX);
+            }
+                // random deceleration
+            if (dec[c.id]) {
+                speed_snapshot[c.id] = std::max(0, c.v - 1);
+            }
         }
-            // 
+        for (int i = 0; i < N; i++) {
+            position_update(cars, lanes, L, N, speed_snapshot);
+        }
     }
 }
 
