@@ -102,6 +102,11 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 continue;
             }
         }
+            // car wise determine start/dec/acc
+        for (int i = 0; i < N; i++) {
+                // slow start
+        }
+            // 
     }
 }
 
