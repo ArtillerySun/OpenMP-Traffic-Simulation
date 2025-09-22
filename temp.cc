@@ -103,6 +103,7 @@ void position_update(std::vector<Car>& cars, std::vector<std::vector<int>>& lane
             // update car object 
         cars[i].position = new_position;
         cars[i].v = speed_snapshot[i];
+        
     }
 }
 
@@ -116,8 +117,6 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     int t = 0;
         // force accelerate state 
     std::vector<char> force_acc(N, 0);
-        // acceleration decision state
-    std::vector<char> accelerating(N, 0);
         // can change lane decision state
     std::vector<char> change_lane(N, 0);
         // lanes and car position states
@@ -147,9 +146,8 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             ss[i] = flip_coin(P_START, traffic_prng::engine);
             dec[i] = flip_coin(P_DEC, traffic_prng::engine);
         }
-            // clear accelerating and change lane decision state
+            // clear change lane decision state
         std::fill(change_lane.begin(), change_lane.end(), 0);
-        std::fill(accelerating.begin(), accelerating.end(), 0);
             // update lane change decision state
         for (auto c : cars) {
             if (can_switch_lane(cars, c, lanes, L)) {
@@ -168,43 +166,38 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             }
         }
             // car wise determine start/dec/acc
-            // slow start
         for (auto c : cars) {
+            bool modified_by_1 = false;
+            bool modified_by_2 = false;
             int d2 = safe_dist_next(lanes[c.lane], L, c.position);
-            if (c.v == 0 && d2 > 1) {   // satisfy slow start criteria
-                if (force_acc[c.id]) {  // did not accelerate when permitted last round
-                    force_acc[c.id] = 0;
-                    speed_snapshot[c.id] = 1;
-                    accelerating[c.id] = 1;
-                    continue;
-                } 
-                if (ss[c.id]) {         // random start
-                    accelerate(lanes[c.lane], c, L, speed_snapshot, VMAX);
-                    accelerating[c.id] = 1;
-                    continue;
-                } else {
-                    speed_snapshot[c.id] = 0;
-                    force_acc[c.id] = 1;
-                    continue;
-                }
-            } else {
+                // slow start
+            if (force_acc[c.id]) {
+                speed_snapshot[c.id] = 1;
+                force_acc[c.id] = 0;
+                modified_by_1 = true;
+            }
+            if (!force_acc[c.id] && !ss[c.id]) {
+                force_acc[c.id] = 1;
                 continue;
             }
-
-        }
-            // deterministic deceleration & acceleration
-        for (auto c : cars) {
-                // skip deceleration if starting 
-            if (accelerating[c.id] || force_acc[c.id]) {
-                continue;
-            } 
-                // if not starting or not decelerated, accelerate
-            if (!decelerate(cars, lanes[c.lane], c, L, speed_snapshot, VMAX)) {
+            // if (!modified_by_1or2 && c.v == 0 && d2 > 1) {
+            //     if (ss[c.id]) {
+            //         accelerate(lanes[c.lane], c, L, speed_snapshot, VMAX);
+            //         force_acc[c.id] = 0;
+            //         modified_by_1or2 = true;
+            //     } else { 
+            //         speed_snapshot[c.id] = 0;
+            //         force_acc[c.id] = 1;
+            //     }
+            //     modified_by_1or2 = true;
+            // } 
+                // rule based deceleration
+            if (!modified_by_1 && !decelerate(cars, lanes[c.lane], c, L, speed_snapshot, VMAX)) {
                 accelerate(lanes[c.lane], c, L, speed_snapshot, VMAX);
+                modified_by_1 = true;
+                modified_by_2 = true;
             }
-        }
-            // random deceleration
-        for (auto c : cars) {
+                // random deceleration
             if (dec[c.id]) {
                 speed_snapshot[c.id] = std::max(0, speed_snapshot[c.id] - 1);
             }
