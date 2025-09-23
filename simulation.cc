@@ -68,14 +68,12 @@ void executeSimulation(Params params, std::vector<Car> cars) {
 
 
     std::vector<std::vector<Car*>> lanes(2);
-    std::vector<char> ss(N, 0);
-    std::vector<char> dec(N, 0);
 
     lanes[0].reserve(N);
     lanes[1].reserve(N);
 
 
-    for (int i = 0; i < N; ++i) {
+    for (int i = 0; i < N; i++) {
         lanes[cars[i].lane].push_back(&cars[i]);
     }
     std::sort(lanes[0].begin(), lanes[0].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
@@ -86,15 +84,14 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     std::vector<bool> change_lane_decisions(N, false);
     std::vector<bool> force_acc(N, 0);
     
-    for (int t = 0; t < T; t++) {
+    PRNG base = *traffic_prng::engine;
 
-        for (int i = 0; i < N; i++) {
-            ss[i] = flip_coin(P_START, traffic_prng::engine);
-            dec[i] = flip_coin(P_DEC, traffic_prng::engine);
-        }
+    #pragma omp parallel
+    for (int t = 0, K = 0; t < T; t++, K += 2 * N) {
+
         //lane change
-        #pragma omp parallel for
-        for (int i = 0; i < N; ++i) {
+        #pragma omp for
+        for (int i = 0; i < N; i++) {
             const Car& c = cars[i];
             const auto& current_lane = lanes[c.lane];
             const auto& other_lane = lanes[c.lane ^ 1];
@@ -106,53 +103,48 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             }
 
             const Car* p2 = find_next(current_lane, c.position);
-            const Car* p3 = find_next(other_lane, c.position);
-            const Car* p0 = find_prev(other_lane, c.position);
 
             int d2 = (p2 == nullptr) ? L : dist(L, c.position, p2->position);
 
-            if (c.v < d2) {
-                continue;
+            if (c.v >= d2) {
+                const Car* p3 = find_next(other_lane, c.position);
+                int d3 = (p3 == nullptr) ? L : dist(L, c.position, p3->position);
+                if (d2 < d3) {
+                    const Car* p0 = find_prev(other_lane, c.position);
+                    int d0 = (p0 == nullptr) ? L : dist(L, p0->position, c.position);
+                    if (p0 == nullptr || d0 > p0->v) {
+                        change_lane_decisions[c.id] = true;
+                    }
+                }
             }
-
-            int d3 = (p3 == nullptr) ? L : dist(L, c.position, p3->position);
-
-            if (d2 >= d3) {
-                continue;
-            }
-
-            int d0 = (p0 == nullptr) ? L : dist(L, p0->position, c.position);
-
-            if (p0 != nullptr && d0 <= p0->v) {
-                continue;
-            }
-
-            change_lane_decisions[c.id] = true;
         }
 
         // apply lane change
         bool has_lane_changed = false;
-        for (int i = 0; i < N; ++i) {
-            if (change_lane_decisions[i]) {
-                has_lane_changed = true;
-                Car& c = cars[i];
-                c.lane ^= 1;
-            }
-        }
-        
-        if (has_lane_changed) {
-            lanes[0].clear();
-            lanes[1].clear();
-            for (int i = 0; i < N; ++i) {
-                lanes[cars[i].lane].push_back(&cars[i]);
-            }
-            std::sort(lanes[0].begin(), lanes[0].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-            std::sort(lanes[1].begin(), lanes[1].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-        }
 
+        #pragma omp single
+        {
+            for (int i = 0; i < N; ++i) {
+                if (change_lane_decisions[i]) {
+                    has_lane_changed = true;
+                    Car& c = cars[i];
+                    c.lane ^= 1;
+                }
+            }
+            
+            if (has_lane_changed) {
+                lanes[0].clear();
+                lanes[1].clear();
+                for (int i = 0; i < N; ++i) {
+                    lanes[cars[i].lane].push_back(&cars[i]);
+                }
+                std::sort(lanes[0].begin(), lanes[0].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
+                std::sort(lanes[1].begin(), lanes[1].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
+            }
+        }
 
         // acc & dec
-        #pragma omp parallel for
+        #pragma omp for
         for (int i = 0; i < N; ++i) {
             const Car& c = cars[i];
             const auto& current_lane = lanes[c.lane];
@@ -160,6 +152,14 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             const Car* next_car = find_next(current_lane, c.position);
             int d = (next_car == nullptr) ? L : dist(L, c.position, next_car->position);
             
+            
+            long long k = K + 2 * i;
+            PRNG e = base;
+            e.discard(k);
+            bool ss = flip_coin(P_START, &e);
+            bool dec = flip_coin(P_DEC, &e);
+        
+
             int new_v = c.v;
             bool skip_2 = false, skip_3 = false;
             // slow start
@@ -167,7 +167,7 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 if (force_acc[c.id]) {
                     new_v = 1;
                     force_acc[c.id] = 0;
-                } else if (!ss[c.id]) {
+                } else if (!ss) {
                     new_v = 0;
                     force_acc[c.id] = 1;
                     skip_2 = true;
@@ -205,7 +205,7 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             }
             
             // dec with probabilty
-            if (dec[c.id]) {
+            if (dec) {
                 new_v = std::max(0, new_v - 1);
             }
             
@@ -214,14 +214,16 @@ void executeSimulation(Params params, std::vector<Car> cars) {
 
 
         // update
-        for (int i = 0; i < N; ++i) {
-            cars[i].v = next_speeds[i];
-            cars[i].position = (cars[i].position + cars[i].v) % L;
+        #pragma omp single
+        {
+            for (int i = 0; i < N; ++i) {
+                cars[i].v = next_speeds[i];
+                cars[i].position = (cars[i].position + cars[i].v) % L;
+            }
+
+            std::sort(lanes[0].begin(), lanes[0].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
+            std::sort(lanes[1].begin(), lanes[1].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
         }
-
-        std::sort(lanes[0].begin(), lanes[0].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-        std::sort(lanes[1].begin(), lanes[1].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-
     }
 
     #ifdef DEBUG
