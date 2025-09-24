@@ -14,39 +14,6 @@ namespace traffic_prng {
     extern PRNG* engine;
 }
 
-static void parallel_merge(std::vector<int>& final_array, 
-    std::vector<std::vector<int>>& to_merge, int max_threads) {
-
-    int num_active_lanes = max_threads;
-    int group_size = 2;
-
-    while (num_active_lanes > 1) {
-        #pragma omp taskgroup
-        {
-            for (int i = 0; i + (group_size >> 1) < num_active_lanes; i += group_size) {
-                #pragma omp task
-                {
-                    std::vector<int> temp_buffer;
-                    temp_buffer.reserve(to_merge[i].size() + to_merge[i + (group_size >> 1)].size());
-                    std::merge(to_merge[i].begin(), to_merge[i].end(),
-                               to_merge[i + (group_size >> 1)].begin(), to_merge[i + (group_size >> 1)].end(),
-                               std::back_inserter(temp_buffer));
-                    to_merge[i] = std::move(temp_buffer);
-                }
-            }
-        }
-
-        if (num_active_lanes % 2 != 0) {
-            to_merge[num_active_lanes >> 1] = std::move(to_merge[num_active_lanes - 1]);
-        }
-
-        num_active_lanes = (num_active_lanes + 1) >> 1;
-        group_size <<= 1;
-    }
-
-    final_array.swap(to_merge[0]);
-}
-
 static inline int find_next(const std::vector<int>& lane_pos, int position) {
     if (lane_pos.empty()) {
         return -1;
@@ -114,11 +81,7 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     std::vector<bool> change_lane_decisions(N, false);
     std::vector<bool> force_acc(N, 0);
 
-    int max_threads = omp_get_max_threads();
-    std::vector<std::vector<int>> local_lanes_pos_0(max_threads);
-    std::vector<std::vector<int>> local_lanes_pos_1(max_threads);
-
-    std::vector<int> merge_buffer;
+    std::vector<int> new_lane_pos_0, new_lane_pos_1;
     
     #pragma omp parallel
     for (int t = 0; t < T; t++) {
@@ -282,32 +245,46 @@ void executeSimulation(Params params, std::vector<Car> cars) {
         #pragma omp for
         for (int i = 0; i < N; i++) {
             auto& c = cars[i];
-            int old_position = c.position;
             c.v = next_speeds[i];
-            c.position = (old_position + c.v) % L;
+            c.position = (c.position + c.v) % L;
         }
-
-        int tid = omp_get_thread_num();
-        local_lanes_pos_0[tid].clear();
-        local_lanes_pos_1[tid].clear();
-
-        #pragma omp for
-        for (int i = 0; i < N; ++i) {
-            int current_tid = omp_get_thread_num();
-            if (cars[i].lane == 0) {
-                local_lanes_pos_0[current_tid].push_back(cars[i].position);
-            } else {
-                local_lanes_pos_1[current_tid].push_back(cars[i].position);
-            }
-        }
-
-        std::sort(local_lanes_pos_0[tid].begin(), local_lanes_pos_0[tid].end());
-        std::sort(local_lanes_pos_1[tid].begin(), local_lanes_pos_1[tid].end());
 
         #pragma omp barrier
 
         #pragma omp single
         {
+            #pragma omp taskgroup
+            {
+                #pragma omp task
+                {
+                    new_lane_pos_0.clear();
+                    new_lane_pos_0.reserve(lanes_pos[0].size());
+                    for (int old_pos : lanes_pos[0]) {
+                        new_lane_pos_0.push_back(cars[lanes_id[0][old_pos]].position);
+                    }
+                    auto pivot = std::is_sorted_until(new_lane_pos_0.begin(), new_lane_pos_0.end());
+
+                    if (pivot != new_lane_pos_0.end()) {
+                        std::rotate(new_lane_pos_0.begin(), pivot, new_lane_pos_0.end());
+                    }
+                    lanes_pos[0].swap(new_lane_pos_0);
+                }
+
+                #pragma omp task
+                {
+                    new_lane_pos_1.clear();
+                    new_lane_pos_1.reserve(lanes_pos[1].size());
+                    for (int old_pos : lanes_pos[1]) {
+                        new_lane_pos_1.push_back(cars[lanes_id[1][old_pos]].position);
+                    }
+                    auto pivot = std::is_sorted_until(new_lane_pos_1.begin(), new_lane_pos_1.end());
+                    if (pivot != new_lane_pos_1.end()) {
+                        std::rotate(new_lane_pos_1.begin(), pivot, new_lane_pos_1.end());
+                    }
+                    lanes_pos[1].swap(new_lane_pos_1);
+                }
+            }
+
             #pragma omp taskgroup
             {
                 #pragma omp task
@@ -326,33 +303,6 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             for(int i = 0; i < N; ++i) {
                 lanes_id[cars[i].lane][cars[i].position] = cars[i].id;
             }
-
-            // // lane 0
-            // merge_buffer_A = local_lanes_pos_0[0];
-            // for (int i = 1; i < max_threads; i++) {
-            //     merge_buffer_B.clear();
-            //     merge_buffer_B.reserve(merge_buffer_A.size() + local_lanes_pos_0[i].size());
-            //     std::merge(merge_buffer_A.begin(), merge_buffer_A.end(),
-            //                local_lanes_pos_0[i].begin(), local_lanes_pos_0[i].end(),
-            //                std::back_inserter(merge_buffer_B));
-            //     merge_buffer_A.swap(merge_buffer_B);
-            // }
-            // lanes_pos[0].swap(merge_buffer_A);
-
-            // // lane 1
-            // merge_buffer_A = local_lanes_pos_1[0];
-            // for (int i = 1; i < max_threads; i++) {
-            //     merge_buffer_B.clear();
-            //     merge_buffer_B.reserve(merge_buffer_A.size() + local_lanes_pos_1[i].size());
-            //     std::merge(merge_buffer_A.begin(), merge_buffer_A.end(),
-            //                local_lanes_pos_1[i].begin(), local_lanes_pos_1[i].end(),
-            //                std::back_inserter(merge_buffer_B));
-            //     merge_buffer_A.swap(merge_buffer_B);
-            // }
-            // lanes_pos[1].swap(merge_buffer_A);
-
-            parallel_merge(lanes_pos[0], local_lanes_pos_0, max_threads);
-            parallel_merge(lanes_pos[1], local_lanes_pos_1, max_threads);
         }
     }
 
