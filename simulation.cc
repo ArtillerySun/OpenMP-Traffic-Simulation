@@ -239,7 +239,6 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             next_speeds[c.id] = new_v;
         }
 
-
         // update
         
         #pragma omp for
@@ -257,26 +256,41 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             {
                 #pragma omp task
                 {
-                    new_lane_pos_0.clear();
-                    new_lane_pos_0.reserve(lanes_pos[0].size());
-                    for (int old_pos : lanes_pos[0]) {
-                        new_lane_pos_0.push_back(cars[lanes_id[0][old_pos]].position);
-                    }
-                    auto pivot = std::is_sorted_until(new_lane_pos_0.begin(), new_lane_pos_0.end());
+                    new_lane_pos_0.resize(lanes_pos[0].size());
+                }
+                #pragma omp task
+                {
+                    new_lane_pos_1.resize(lanes_pos[1].size());
+                }
+            }
+        }
 
+        #pragma omp for
+        for (size_t i = 0; i < lanes_pos[0].size(); i++) {
+            new_lane_pos_0[i] = cars[lanes_id[0][lanes_pos[0][i]]].position;
+        }
+
+        #pragma omp for
+        for (size_t i = 0; i < lanes_pos[1].size(); i++) {
+            new_lane_pos_1[i] = cars[lanes_id[1][lanes_pos[1][i]]].position;
+        }
+
+        #pragma omp barrier
+
+        #pragma omp single
+        {
+            #pragma omp taskgroup
+            {
+                #pragma omp task
+                { 
+                    auto pivot = std::is_sorted_until(new_lane_pos_0.begin(), new_lane_pos_0.end());
                     if (pivot != new_lane_pos_0.end()) {
                         std::rotate(new_lane_pos_0.begin(), pivot, new_lane_pos_0.end());
                     }
                     lanes_pos[0].swap(new_lane_pos_0);
                 }
-
                 #pragma omp task
                 {
-                    new_lane_pos_1.clear();
-                    new_lane_pos_1.reserve(lanes_pos[1].size());
-                    for (int old_pos : lanes_pos[1]) {
-                        new_lane_pos_1.push_back(cars[lanes_id[1][old_pos]].position);
-                    }
                     auto pivot = std::is_sorted_until(new_lane_pos_1.begin(), new_lane_pos_1.end());
                     if (pivot != new_lane_pos_1.end()) {
                         std::rotate(new_lane_pos_1.begin(), pivot, new_lane_pos_1.end());
@@ -284,25 +298,13 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                     lanes_pos[1].swap(new_lane_pos_1);
                 }
             }
+        }
+        #pragma omp for
+        for(int i = 0; i < L; ++i) lanes_id[0][i] = lanes_id[1][i] = -1;
 
-            #pragma omp taskgroup
-            {
-                #pragma omp task
-                {
-                    #pragma omp parallel for
-                    for(int i = 0; i < L; ++i) lanes_id[0][i] = -1;
-                }
-                #pragma omp task
-                {
-                    #pragma omp parallel for
-                    for(int i = 0; i < L; ++i) lanes_id[1][i] = -1;
-                }
-            }
-
-            #pragma omp parallel for
-            for(int i = 0; i < N; ++i) {
-                lanes_id[cars[i].lane][cars[i].position] = cars[i].id;
-            }
+        #pragma omp for
+        for(int i = 0; i < N; ++i) {
+            lanes_id[cars[i].lane][cars[i].position] = cars[i].id;
         }
     }
 
