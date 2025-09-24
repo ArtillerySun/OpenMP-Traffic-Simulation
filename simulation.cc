@@ -1,41 +1,36 @@
 #include <assert.h>
 #include <omp.h>
-
 #include <algorithm>
 #include <iostream>
-#include <optional>
 #include <vector>
-#include <set>
-#include <unordered_map>
-#include <math.h>
 #include "common.h"
 
 namespace traffic_prng {
     extern PRNG* engine;
 }
 
-static inline int find_next(const std::vector<int>& lane_pos, int position) {
-    if (lane_pos.empty()) {
-        return -1;
-    }
-    auto it = std::upper_bound(lane_pos.begin(), lane_pos.end(), position);
-    
-    if (it != lane_pos.end()) {
-        return *it;
-    }
-    return lane_pos.front(); // Wrap around
+static auto sortByPosition = [](const Car* a, const Car* b) {
+    return a->position < b->position;
+};
+
+static inline Car* find_next_ptr(const std::vector<Car*>& lane_ptrs, int position) {
+    if (lane_ptrs.empty()) return nullptr;
+    auto it = std::upper_bound(lane_ptrs.begin(), lane_ptrs.end(), position, 
+        [](int pos, const Car* c){ return pos < c->position; });
+    return (it != lane_ptrs.end()) ? *it : lane_ptrs.front();
 }
 
-static inline int find_prev(const std::vector<int>& lane_pos, int position) {
-    if (lane_pos.empty()) {
-        return -1;
-    }
-    auto it = std::lower_bound(lane_pos.begin(), lane_pos.end(), position);
+static inline Car* find_prev_ptr(const std::vector<Car*>& lane_ptrs, int position) {
+    if (lane_ptrs.empty()) return nullptr;
+    auto it = std::lower_bound(lane_ptrs.begin(), lane_ptrs.end(), position,
+        [](const Car* c, int pos){ return c->position < pos; });
+    return (it != lane_ptrs.begin()) ? *(--it) : lane_ptrs.back();
+}
 
-    if (it != lane_pos.begin()) {
-        return *(--it);
-    }
-    return lane_pos.back(); // Wrap around
+static inline bool is_pos_occupied_ptr(const std::vector<Car*>& lane_ptrs, int pos) {
+    auto it = std::lower_bound(lane_ptrs.begin(), lane_ptrs.end(), pos,
+        [](const Car* c, int val){ return c->position < val; });
+    return (it != lane_ptrs.end() && (*it)->position == pos);
 }
 
 static inline int dist(int L, int prev, int next) { 
@@ -43,211 +38,219 @@ static inline int dist(int L, int prev, int next) {
     return d == 0 ? L : d; 
 }
 
-static inline bool is_pos_occupied(const std::vector<int>& lane_pos, int pos) {
-    auto it = std::lower_bound(lane_pos.begin(), lane_pos.end(), pos);
-    return (it != lane_pos.end() && (*it) == pos);
+
+static void parallel_merge(std::vector<Car*>& final_array, 
+    std::vector<std::vector<Car*>>& to_merge, int max_threads) {
+    
+    if (max_threads == 0) { final_array.clear(); return; }
+    if (max_threads == 1) {
+        final_array.swap(to_merge[0]);
+        return;
+    }
+
+    int num_active_lanes = max_threads;
+    int group_size = 2;
+
+    while (num_active_lanes > 1) {
+        #pragma omp taskgroup
+        {
+            for (int i = 0; i + (group_size >> 1) < num_active_lanes; i += group_size) {
+                #pragma omp task
+                {
+                    std::vector<Car*> temp_buffer;
+                    temp_buffer.reserve(to_merge[i].size() + to_merge[i + (group_size >> 1)].size());
+                    std::merge(to_merge[i].begin(), to_merge[i].end(),
+                               to_merge[i + (group_size >> 1)].begin(), to_merge[i + (group_size >> 1)].end(),
+                               std::back_inserter(temp_buffer), sortByPosition);
+                    to_merge[i] = std::move(temp_buffer);
+                }
+            }
+        }
+        #pragma omp taskwait
+
+        if (num_active_lanes % 2 != 0) {
+            to_merge[num_active_lanes >> 1] = std::move(to_merge[num_active_lanes - 1]);
+        }
+
+        num_active_lanes = (num_active_lanes + 1) >> 1;
+        group_size <<= 1;
+    }
+
+    final_array.swap(to_merge[0]);
 }
 
 
 void executeSimulation(Params params, std::vector<Car> cars) {
-    const int N = params.n;
-    const int L = params.L;
-    const int T = params.steps;
-    const int VMAX = params.vmax;
-    const double P_START = params.p_start;
-    const double P_DEC = params.p_dec;
+    const int N = params.n, L = params.L, T = params.steps, VMAX = params.vmax;
+    const double P_START = params.p_start, P_DEC = params.p_dec;
 
+    std::vector<std::vector<Car*>> lanes_car_ptrs(2);
+    lanes_car_ptrs[0].reserve(N);
+    lanes_car_ptrs[1].reserve(N);
 
-    std::vector<std::vector<int>> lanes_pos(2);
-    std::vector<std::vector<int>> lanes_id(2, std::vector<int>(L, -1));
-
-    std::vector<bool> ss(N);
-    std::vector<bool> dec(N);
-
-
-    lanes_pos[0].reserve(N);
-    lanes_pos[1].reserve(N);
-
-    for (auto &c : cars) {
-        lanes_pos[c.lane].push_back(c.position);
-        lanes_id[c.lane][c.position] = c.id;
+    for (int i = 0; i < N; ++i) {
+        lanes_car_ptrs[cars[i].lane].push_back(&cars[i]);
     }
-
-    std::sort(lanes_pos[0].begin(), lanes_pos[0].end());
-    std::sort(lanes_pos[1].begin(), lanes_pos[1].end());
-
+    std::sort(lanes_car_ptrs[0].begin(), lanes_car_ptrs[0].end(), sortByPosition);
+    std::sort(lanes_car_ptrs[1].begin(), lanes_car_ptrs[1].end(), sortByPosition);
 
     std::vector<int> next_speeds(N);
     std::vector<bool> change_lane_decisions(N, false);
     std::vector<bool> force_acc(N, 0);
-
-    std::vector<int> new_lane_pos_0, new_lane_pos_1;
+    std::vector<bool> ss(N), dec(N);
     
+    int max_threads = omp_get_max_threads();
+    std::vector<std::vector<Car*>> local_lanes_ptrs_0(max_threads);
+    std::vector<std::vector<Car*>> local_lanes_ptrs_1(max_threads);
+
     #pragma omp parallel
     for (int t = 0; t < T; t++) {
 
+        // prng
         #pragma omp single
-        for (int i = 0; i < N; i++) {
-            ss[i] = flip_coin(P_START, traffic_prng::engine);
+        for(int i = 0; i < N; i++) { 
+            ss[i] = flip_coin(P_START, traffic_prng::engine); 
             dec[i] = flip_coin(P_DEC, traffic_prng::engine);
         }
 
-        //lane change
+        // change lane
         #pragma omp for
         for (int i = 0; i < N; i++) {
-            const Car& c = cars[i];
-            const auto& current_lane_pos = lanes_pos[c.lane];
-            const auto& other_lane_pos = lanes_pos[c.lane ^ 1];
-            // const auto& current_lane_id = lanes_id[c.lane];
-            const auto& other_lane_id = lanes_id[c.lane ^ 1];
-
+            Car& c = cars[i];
+            const auto& current_lane_ptrs = lanes_car_ptrs[c.lane];
+            const auto& other_lane_ptrs = lanes_car_ptrs[c.lane ^ 1];
+            
             change_lane_decisions[c.id] = false;
+            if (is_pos_occupied_ptr(other_lane_ptrs, c.position)) continue;
 
-            if (is_pos_occupied(other_lane_pos, c.position)) {
-                continue;
-            }
-
-            int p2 = find_next(current_lane_pos, c.position);
-
-            int d2 = (p2 < 0) ? L : dist(L, c.position, p2);
+            Car* p2 = find_next_ptr(current_lane_ptrs, c.position);
+            int d2 = (p2 == nullptr) ? L : dist(L, c.position, p2->position);
 
             if (c.v >= d2) {
-                int p3 = find_next(other_lane_pos, c.position);
-                int d3 = (p3 < 0) ? L : dist(L, c.position, p3);
+                Car* p3 = find_next_ptr(other_lane_ptrs, c.position);
+                int d3 = (p3 == nullptr) ? L : dist(L, c.position, p3->position);
                 if (d2 < d3) {
-                    int p0 = find_prev(other_lane_pos, c.position);
-                    int d0 = (p0 < 0) ? L : dist(L, p0, c.position);
-                    if (p0 < 0 || d0 > cars[other_lane_id[p0]].v) {
+                    Car* p0 = find_prev_ptr(other_lane_ptrs, c.position);
+                    int d0 = (p0 == nullptr) ? L : dist(L, p0->position, c.position);
+                    if (p0 == nullptr || d0 > p0->v) {
                         change_lane_decisions[c.id] = true;
                     }
                 }
             }
         }
-
+        
         // apply lane change
         #pragma omp single
         {
-            std::vector<int> moved_from_0_to_1;
-            std::vector<int> moved_from_1_to_0;
+            std::vector<Car*> moved_from_0_to_1;
+            std::vector<Car*> moved_from_1_to_0;
 
             for (int i = 0; i < N; i++) {
                 if (change_lane_decisions[i]) {
                     Car& c = cars[i];
                     if (c.lane == 0) {
-                        moved_from_0_to_1.push_back(c.position);
+                        moved_from_0_to_1.push_back(&c);
                     } else {
-                        moved_from_1_to_0.push_back(c.position);
+                        moved_from_1_to_0.push_back(&c);
                     }
-                    lanes_id[c.lane][c.position] = -1;
                     c.lane ^= 1;
-                    lanes_id[c.lane][c.position] = c.id;
                 }
             }
 
-            if (!moved_from_0_to_1.empty() || !moved_from_1_to_0.empty()) {
-                
+            if (!moved_from_0_to_1.empty() || !moved_from_1_to_0.empty()) {           
                 if (!moved_from_0_to_1.empty()) {
-                    std::sort(moved_from_0_to_1.begin(), moved_from_0_to_1.end());
-                    auto new_end = std::remove_if(lanes_pos[0].begin(), lanes_pos[0].end(), [&](int pos) {
-                        return std::binary_search(moved_from_0_to_1.begin(), moved_from_0_to_1.end(), pos); 
+                    std::sort(moved_from_0_to_1.begin(), moved_from_0_to_1.end(), sortByPosition);
+                    auto new_end = std::remove_if(lanes_car_ptrs[0].begin(), lanes_car_ptrs[0].end(), [&](Car* p) {
+                        return std::binary_search(moved_from_0_to_1.begin(), moved_from_0_to_1.end(), p, sortByPosition); 
                     });
-                    lanes_pos[0].erase(new_end, lanes_pos[0].end());
+                    lanes_car_ptrs[0].erase(new_end, lanes_car_ptrs[0].end());
                 }
 
                 if (!moved_from_1_to_0.empty()) {
-                    std::sort(moved_from_1_to_0.begin(), moved_from_1_to_0.end());
-                    auto new_end = std::remove_if(lanes_pos[1].begin(), lanes_pos[1].end(), [&](int pos) {
-                        return std::binary_search(moved_from_1_to_0.begin(), moved_from_1_to_0.end(), pos);
+                    std::sort(moved_from_1_to_0.begin(), moved_from_1_to_0.end(), sortByPosition);
+                    auto new_end = std::remove_if(lanes_car_ptrs[1].begin(), lanes_car_ptrs[1].end(), [&](Car* p) {
+                        return std::binary_search(moved_from_1_to_0.begin(), moved_from_1_to_0.end(), p, sortByPosition);
                     });
-                    lanes_pos[1].erase(new_end, lanes_pos[1].end());
+                    lanes_car_ptrs[1].erase(new_end, lanes_car_ptrs[1].end());
                 }
 
-                std::vector<int> new_lane0;
-                new_lane0.reserve(lanes_pos[0].size() + moved_from_1_to_0.size());
-                std::merge(lanes_pos[0].begin(), lanes_pos[0].end(),
-                        moved_from_1_to_0.begin(), moved_from_1_to_0.end(),
-                        std::back_inserter(new_lane0));
-                lanes_pos[0] = std::move(new_lane0);
+                std::vector<Car*> new_lane0;
+                new_lane0.reserve(lanes_car_ptrs[0].size() + moved_from_1_to_0.size());
+                std::merge(lanes_car_ptrs[0].begin(), lanes_car_ptrs[0].end(), moved_from_1_to_0.begin(), 
+                    moved_from_1_to_0.end(), std::back_inserter(new_lane0), sortByPosition);
+                lanes_car_ptrs[0] = std::move(new_lane0);
 
-                std::vector<int> new_lane1;
-                new_lane1.reserve(lanes_pos[1].size() + moved_from_0_to_1.size());
-                std::merge(lanes_pos[1].begin(), lanes_pos[1].end(),
-                        moved_from_0_to_1.begin(), moved_from_0_to_1.end(),
-                        std::back_inserter(new_lane1));
-                lanes_pos[1] = std::move(new_lane1);
+                std::vector<Car*> new_lane1;
+                new_lane1.reserve(lanes_car_ptrs[1].size() + moved_from_0_to_1.size());
+                std::merge(lanes_car_ptrs[1].begin(), lanes_car_ptrs[1].end(), moved_from_0_to_1.begin(), 
+                    moved_from_0_to_1.end(), std::back_inserter(new_lane1), sortByPosition);
+                lanes_car_ptrs[1] = std::move(new_lane1);
             }
         }
 
-        // acc & dec
+        // acc and dec
         #pragma omp for
         for (int i = 0; i < N; i++) {
-            const Car& c = cars[i];
-            const auto& current_lane_pos = lanes_pos[c.lane];
-            const auto& current_lane_id = lanes_id[c.lane];
+            Car& c = cars[i];
+            const auto& current_lane_ptrs = lanes_car_ptrs[c.lane];
             
-            int p2 = find_next(current_lane_pos, c.position);
-            int d = (p2 < 0) ? L : dist(L, c.position, p2);
+            Car* p2 = find_next_ptr(current_lane_ptrs, c.position);
+            int d = (p2 == nullptr) ? L : dist(L, c.position, p2->position);
 
             int new_v = c.v;
-            bool skip_2 = false, skip_3 = false;
-            // slow start
+            bool modified = false;
+
             if (c.v == 0 && d > 1) {
                 if (force_acc[c.id]) {
-                    new_v = 1;
-                    force_acc[c.id] = 0;
-                } else if (!ss[i]) {
-                    new_v = 0;
-                    force_acc[c.id] = 1;
-                    skip_2 = true;
-                    skip_3 = true;
-                } else { // ss = 1
-                    skip_2 = true;
+                    new_v = 1; force_acc[c.id] = false;
+                } else if (!ss[c.id]) {
+                    new_v = 0; force_acc[c.id] = true; modified = true;
                 }
             }
-
-            // dec
-            bool modified = false;
-            if (!skip_2) {
-                int d  = (p2 < 0) ? L : dist(L, c.position, p2);
-                int v2 = (p2 < 0) ? VMAX : cars[current_lane_id[p2]].v; 
+            if (!modified) {
                 int v1 = c.v;
+                int v2 = (p2 == nullptr) ? VMAX : p2->v; 
                 if (d <= v1) {
-                    if (v1 < v2 || v1 < 2) {
-                        new_v = d - 1;
-                        modified = true;
-                    } else if (v1 >= v2 && v1 >= 2) {
-                        new_v = std::min(d - 1, v1 - 2);
-                        modified = true;
-                    }
-                }
-                if (v1 < d && d <= 2 * v1 && v1 >= v2) {
+                    if (v1 < v2 || v1 < 2) new_v = d - 1;
+                    else new_v = std::min(d - 1, v1 - 2);
+                } else if (v1 < d && d <= 2 * v1 && v1 >= v2) {
                     new_v = v1 - (v1 - v2) / 2;
-                    modified = true;
+                } else {
+                    new_v = std::min(d - 1, std::min(v1 + 1, VMAX));
                 }
             }
-
-            // acc
-            if (!skip_3 && !modified) {
-                new_v = std::min(d - 1, std::min(c.v + 1, VMAX));
-            }
-            
-            // dec with probabilty
-            if (dec[i]) {
+            if (dec[c.id]) {
                 new_v = std::max(0, new_v - 1);
             }
-            
             next_speeds[c.id] = new_v;
         }
 
         // update
-        
         #pragma omp for
         for (int i = 0; i < N; i++) {
-            auto& c = cars[i];
-            c.v = next_speeds[i];
-            c.position = (c.position + c.v) % L;
+            cars[i].v = next_speeds[i];
+            cars[i].position = (cars[i].position + cars[i].v) % L;
         }
 
+        #pragma omp barrier
+
+        int tid = omp_get_thread_num();
+        local_lanes_ptrs_0[tid].clear();
+        local_lanes_ptrs_1[tid].clear();
+
+        #pragma omp for
+        for (int i = 0; i < N; i++) {
+            int current_tid = omp_get_thread_num();
+            if (cars[i].lane == 0) {
+                local_lanes_ptrs_0[current_tid].push_back(&cars[i]);
+            } else {
+                local_lanes_ptrs_1[current_tid].push_back(&cars[i]);
+            }
+        }
+
+        std::sort(local_lanes_ptrs_0[tid].begin(), local_lanes_ptrs_0[tid].end(), sortByPosition);
+        std::sort(local_lanes_ptrs_1[tid].begin(), local_lanes_ptrs_1[tid].end(), sortByPosition);
+        
         #pragma omp barrier
 
         #pragma omp single
@@ -255,59 +258,12 @@ void executeSimulation(Params params, std::vector<Car> cars) {
             #pragma omp taskgroup
             {
                 #pragma omp task
-                {
-                    new_lane_pos_0.resize(lanes_pos[0].size());
-                }
+                parallel_merge(lanes_car_ptrs[0], local_lanes_ptrs_0, max_threads);
                 #pragma omp task
-                {
-                    new_lane_pos_1.resize(lanes_pos[1].size());
-                }
+                parallel_merge(lanes_car_ptrs[1], local_lanes_ptrs_1, max_threads);
             }
-        }
-
-        #pragma omp for
-        for (size_t i = 0; i < lanes_pos[0].size(); i++) {
-            new_lane_pos_0[i] = cars[lanes_id[0][lanes_pos[0][i]]].position;
-        }
-
-        #pragma omp for
-        for (size_t i = 0; i < lanes_pos[1].size(); i++) {
-            new_lane_pos_1[i] = cars[lanes_id[1][lanes_pos[1][i]]].position;
-        }
-
-        #pragma omp barrier
-
-        #pragma omp single
-        {
-            #pragma omp taskgroup
-            {
-                #pragma omp task
-                { 
-                    auto pivot = std::is_sorted_until(new_lane_pos_0.begin(), new_lane_pos_0.end());
-                    if (pivot != new_lane_pos_0.end()) {
-                        std::rotate(new_lane_pos_0.begin(), pivot, new_lane_pos_0.end());
-                    }
-                    lanes_pos[0].swap(new_lane_pos_0);
-                }
-                #pragma omp task
-                {
-                    auto pivot = std::is_sorted_until(new_lane_pos_1.begin(), new_lane_pos_1.end());
-                    if (pivot != new_lane_pos_1.end()) {
-                        std::rotate(new_lane_pos_1.begin(), pivot, new_lane_pos_1.end());
-                    }
-                    lanes_pos[1].swap(new_lane_pos_1);
-                }
-            }
-        }
-        #pragma omp for
-        for(int i = 0; i < L; ++i) lanes_id[0][i] = lanes_id[1][i] = -1;
-
-        #pragma omp for
-        for(int i = 0; i < N; ++i) {
-            lanes_id[cars[i].lane][cars[i].position] = cars[i].id;
         }
     }
-
     #ifdef DEBUG
     reportFinalResult(cars);
     #endif
