@@ -5,58 +5,88 @@
 #include <iostream>
 #include <optional>
 #include <vector>
-#include <set>
-#include <unordered_map>
 #include <math.h>
 #include "common.h"
 
 namespace traffic_prng {
     extern PRNG* engine;
 }
-
-struct CarPositionComparator {
-    bool operator()(const Car* a, int pos) const {
-        return a->position < pos;
+    // on the same lane, find the position of the immediately next car
+static inline int find_next(const std::vector<int>& lane, const int lane_num, const int L, int position) {
+        // min 1 car next
+    for (int i = 1; i < L; i++) {
+            // mod to wrap back 
+        int wrapped_shifted = (position + i) % L;
+        if (lane[lane_num * L + wrapped_shifted] != -1) {
+            return wrapped_shifted;
+        } 
     }
-    bool operator()(int pos, const Car* a) const {
-        return pos < a->position;
-    }
-};
-
-static inline const Car* find_next(const std::vector<Car*>& lane, int position) {
-    if (lane.empty()) {
-        return nullptr;
-    }
-    auto it = std::upper_bound(lane.begin(), lane.end(), position, CarPositionComparator());
-    
-    if (it != lane.end()) {
-        return *it;
-    }
-    return lane.front(); // Wrap around
+    return -1; // not supposed to happen
 }
-
-static inline const Car* find_prev(const std::vector<Car*>& lane, int position) {
-    if (lane.empty()) {
-        return nullptr;
+static inline int find_prev(const std::vector<int>& lane,const int lane_num, const int L, int position) {
+    for (int i = 1; i < L; i++) {
+        int wrapped_shifted = (position - i + L) % L;
+        if (lane[lane_num * L + wrapped_shifted] != -1) {
+            return wrapped_shifted;
+        } 
     }
-    auto it = std::lower_bound(lane.begin(), lane.end(), position, CarPositionComparator());
-
-    if (it != lane.begin()) {
-        return *(--it);
-    }
-    return lane.back(); // Wrap around
+    return -1; // not supposed to happen
 }
-
+    // compute distance from 2 position on circular road
 static inline int dist(int L, int prev, int next) { 
     int d = (next - prev + L) % L; 
     return d == 0 ? L : d; 
 }
 
-static inline bool is_pos_occupied(const std::vector<Car*>& lane, int pos) {
-    auto it = std::lower_bound(lane.begin(), lane.end(), pos, CarPositionComparator());
-    return (it != lane.end() && (*it)->position == pos);
+static inline int safe_dist_next(const std::vector<int>& lane, const int lane_num, const int L, int position) {
+    int p = find_next(lane, lane_num, L, position);
+    return (p < 0) ? L : dist(L, position, p);
 }
 
+bool can_switch_lane(const std::vector<Car>& cars, const Car& c, const std::vector<int>& lanes, const int L) {
+    int p2 = find_next(lanes, c.lane, L, c.position);
+    int p3 = find_next(lanes, c.lane^1, L, c.position);
+    int p0 = find_prev(lanes, c.lane^1, L, c.position);
+    int d2 = (p2 < 0) ? L : dist(L, c.position, p2);
+    int d0 = (p0 < 0) ? L : dist(L, p0, c.position);
+    int d3 = (p3 < 0) ? L : dist(L, c.position, p3);
+    return d2 < d3 && 
+            c.v >= d2 && 
+            lanes[(c.lane^1) * L + c.position] == -1 
+            && (d0 == L || d0 > cars[lanes[(c.lane^1) * L + p0]].v);
+}
+
+bool decelerate(const std::vector<Car>& cars,const std::vector<int>& lane, const int lane_num, const Car& c, const int L, 
+        int* speed_snapshot, const int VMAX) {
+    int p2 = find_next(lane, lane_num, L, c.position);
+    int d  = (p2 < 0) ? L : dist(L, c.position, p2);
+    int v2 = (p2 < 0) ? VMAX : cars[lane[lane_num * L + p2]].v; 
+    int v1 = c.v;
+    if (d <= v1) {
+        if (v1 < v2 || v1 < 2) {
+            *speed_snapshot = d - 1;
+            return true;
+        } else if (v1 >= v2 && v1 >= 2) {
+            *speed_snapshot = std::min(d - 1, v1 - 2);
+            return true;
+        } else {
+            return false;
+        }
+    }
+    if (v1 < d && d <= 2 * v1 && v1 >= v2) {
+        *speed_snapshot = v1 - std::floor((v1 - v2) / 2);
+        return true;
+    }
+    return false;
+}
+
+void accelerate(const std::vector<int>& lane, const int lane_num, const Car& c, const int L, 
+        int* speed_snapshot, const int& VMAX) {
+    int p2 = find_next(lane, lane_num, L, c.position);
+    int d = (p2 < 0) ? L : dist(L, c.position, p2);
+    int v1 = c.v;
+    *speed_snapshot = std::min(d - 1, std::min(v1 + 1, VMAX));
+}
 
 void executeSimulation(Params params, std::vector<Car> cars) {
     const int N = params.n;
@@ -65,166 +95,144 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     const int VMAX = params.vmax;
     const double P_START = params.p_start;
     const double P_DEC = params.p_dec;
+    int t = 0;
+    std::vector<char> force_acc(N, 0);
+    std::vector<int> cur_lanes(2 * L, -1); 
+    std::vector<int> nxt_lanes(2 * L, -1); 
 
+    // std::vector<int> speed_snapshot(N, 0);
+    // std::vector<char> dec1(N, 0);
 
-    std::vector<std::vector<Car*>> lanes(2);
-    std::vector<char> ss(N, 0);
-    std::vector<char> dec(N, 0);
+    std::vector<Car> tmp_cars(N);
 
-    lanes[0].reserve(N);
-    lanes[1].reserve(N);
-
-
-    for (int i = 0; i < N; ++i) {
-        lanes[cars[i].lane].push_back(&cars[i]);
-    }
-    std::sort(lanes[0].begin(), lanes[0].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-    std::sort(lanes[1].begin(), lanes[1].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-
-
-    std::vector<int> next_speeds(N);
-    std::vector<bool> change_lane_decisions(N, false);
-    std::vector<bool> force_acc(N, 0);
-    
-    for (int t = 0; t < T; ++t) {
-
-        for (int i = 0; i < N; i++) {
-            ss[i] = flip_coin(P_START, traffic_prng::engine);
-            dec[i] = flip_coin(P_DEC, traffic_prng::engine);
-        }
-        //lane change
-        #pragma omp parallel for
-        for (int i = 0; i < N; ++i) {
-            const Car& c = cars[i];
-            const auto& current_lane = lanes[c.lane];
-            const auto& other_lane = lanes[c.lane ^ 1];
-
-            change_lane_decisions[c.id] = false;
-
-            if (is_pos_occupied(other_lane, c.position)) {
-                continue;
-            }
-
-            const Car* p2 = find_next(current_lane, c.position);
-            const Car* p3 = find_next(other_lane, c.position);
-            const Car* p0 = find_prev(other_lane, c.position);
-
-            int d2 = (p2 == nullptr) ? L : dist(L, c.position, p2->position);
-
-            if (c.v < d2) {
-                continue;
-            }
-
-            int d3 = (p3 == nullptr) ? L : dist(L, c.position, p3->position);
-
-            if (d2 >= d3) {
-                continue;
-            }
-
-            int d0 = (p0 == nullptr) ? L : dist(L, p0->position, c.position);
-
-            if (p0 != nullptr && d0 <= p0->v) {
-                continue;
-            }
-
-            change_lane_decisions[c.id] = true;
-        }
-
-        // apply lane change
-        bool has_lane_changed = false;
-        for (int i = 0; i < N; ++i) {
-            if (change_lane_decisions[i]) {
-                has_lane_changed = true;
-                Car& c = cars[i];
-                c.lane ^= 1;
-            }
-        }
-        
-        if (has_lane_changed) {
-            lanes[0].clear();
-            lanes[1].clear();
-            for (int i = 0; i < N; ++i) {
-                lanes[cars[i].lane].push_back(&cars[i]);
-            }
-            std::sort(lanes[0].begin(), lanes[0].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-            std::sort(lanes[1].begin(), lanes[1].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-        }
-
-
-        // acc & dec
-        #pragma omp parallel for
-        for (int i = 0; i < N; ++i) {
-            const Car& c = cars[i];
-            const auto& current_lane = lanes[c.lane];
-            
-            const Car* next_car = find_next(current_lane, c.position);
-            int d = (next_car == nullptr) ? L : dist(L, c.position, next_car->position);
-            
-            int new_v = c.v;
-            bool skip_2 = false, skip_3 = false;
-            // slow start
-            if (c.v == 0 && d > 1) {
-                if (force_acc[c.id]) {
-                    new_v = 1;
-                    force_acc[c.id] = 0;
-                } else if (!ss[c.id]) {
-                    new_v = 0;
-                    force_acc[c.id] = 1;
-                    skip_2 = true;
-                    skip_3 = true;
-                } else { // ss = 1
-                    skip_2 = true;
-                }
-            }
-
-            // dec
-            bool modified = false;
-            if (!skip_2) {
-                int p2 = next_car->position;
-                int d  = (p2 < 0) ? L : dist(L, c.position, p2);
-                int v2 = (p2 < 0) ? VMAX : next_car->v; 
-                int v1 = c.v;
-                if (d <= v1) {
-                    if (v1 < v2 || v1 < 2) {
-                        new_v = d - 1;
-                        modified = true;
-                    } else if (v1 >= v2 && v1 >= 2) {
-                        new_v = std::min(d - 1, v1 - 2);
-                        modified = true;
-                    }
-                }
-                if (v1 < d && d <= 2 * v1 && v1 >= v2) {
-                    new_v = v1 - (v1 - v2) / 2;
-                    modified = true;
-                }
-            }
-
-            // acc
-            if (!skip_3 && !modified) {
-                new_v = std::min(d - 1, std::min(c.v + 1, VMAX));
-            }
-            
-            // dec with probabilty
-            if (dec[c.id]) {
-                new_v = std::max(0, new_v - 1);
-            }
-            
-            next_speeds[c.id] = new_v;
-        }
-
-
-        // update
-        for (int i = 0; i < N; ++i) {
-            cars[i].v = next_speeds[i];
-            cars[i].position = (cars[i].position + cars[i].v) % L;
-        }
-
-        std::sort(lanes[0].begin(), lanes[0].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-        std::sort(lanes[1].begin(), lanes[1].end(), [](const Car* a, const Car* b){ return a->position < b->position; });
-
+    for (auto c : cars) {
+        cur_lanes[c.lane * L + c.position] = c.id;
+        // speed_snapshot[c.id] = c.v;
     }
 
     #ifdef DEBUG
-    reportFinalResult(cars);
+    reportResult(cars, 0);
+    #endif
+
+    const int num_threads = omp_get_max_threads();
+    unsigned K = 0;
+
+    while (t < T) {
+        PRNG base = *traffic_prng::engine;
+        
+        #pragma omp parallel num_threads(num_threads)
+        {
+            int tid = omp_get_thread_num();
+            int chunk_size = (N + num_threads - 1) / num_threads;
+            int start = tid * chunk_size;
+            int end = std::min(N, start + chunk_size);
+
+            std::vector<int> local_nxt_lanes(2 * L, -1);
+            std::vector<Car> local_tmp_cars(end - start);
+
+            for (int i = start; i < end; i++) {
+                const Car &c = cars[i];
+                Car new_c = c;
+
+                if (can_switch_lane(cars, c, cur_lanes, L)) {
+                    new_c.lane ^= 1;
+                }
+
+                local_nxt_lanes[new_c.lane * L + new_c.position] = new_c.id;
+                local_tmp_cars[i - start] = new_c;
+            }
+            
+            #pragma omp critical
+            {
+                for (int i = 0; i < 2*L; i++) {
+                    if (local_nxt_lanes[i] != -1)
+                        nxt_lanes[i] = local_nxt_lanes[i];
+                }
+                for (int i = 0; i < end - start; i++) {
+                    tmp_cars[start + i] = local_tmp_cars[i];
+                }
+            }
+        }
+
+        cur_lanes.swap(nxt_lanes);
+        cars.swap(tmp_cars);
+        std::fill(nxt_lanes.begin(), nxt_lanes.end(), -1);
+
+        std::cerr << "OK\n";
+
+        #pragma omp parallel num_threads(num_threads) 
+        {
+            
+            int tid = omp_get_thread_num();
+            int chunk_size = (N + num_threads - 1) / num_threads;
+            int start = tid * chunk_size;
+            int end = std::min(N, start + chunk_size);
+
+            std::vector<int> local_nxt_lanes(2 * L, -1);
+            std::vector<Car> local_tmp_cars(end - start);
+            PRNG e = base;
+            e.discard(K + 2 * start);
+
+            for (int i = start; i < end; i++) {
+                Car &c = cars[i];
+                Car new_c = c;
+                
+
+                bool if_acc = false;
+                int* cur_speed = &(new_c.v);
+                
+                bool ss = flip_coin(P_START, &e);
+                bool dec = flip_coin(P_DEC, &e);
+
+                int d2 = safe_dist_next(cur_lanes, c.lane, L, c.position);
+                if (c.v == 0 && d2 > 1) {   // satisfy slow start criteria
+                    if (force_acc[c.id]) {  // did not accelerate when permitted last round
+                        force_acc[c.id] = 0;
+                        new_c.v = 1;
+                    } 
+                    else if (ss) {         // random start
+                        accelerate(cur_lanes, c.lane, c, L, cur_speed, VMAX);
+                        if_acc = 1;
+                    } else {
+                        new_c.v = 0;
+                        force_acc[c.id] = 1;
+                    }
+                } else if (!if_acc && !force_acc[c.id] 
+                    && !decelerate(cars, cur_lanes, c.lane, c, L, cur_speed, VMAX)) {
+                    accelerate(cur_lanes, c.lane, c, L, cur_speed, VMAX);
+                }
+
+                if (dec) {
+                    new_c.v = std::max(0, new_c.v - 1);
+                }
+
+                new_c.position = (new_c.position + new_c.v) % L;
+                local_tmp_cars[i - start] = new_c;
+                local_nxt_lanes[new_c.lane * L + new_c.position] = new_c.id;
+            }
+            
+            #pragma omp critical
+            {
+                for (int i = 0; i < 2*L; i++) {
+                    if (local_nxt_lanes[i] != -1)
+                        nxt_lanes[i] = local_nxt_lanes[i];
+                }
+                for (int i = 0; i < end - start; i++) {
+                    tmp_cars[start + i] = local_tmp_cars[i];
+                }
+            }
+        }
+
+
+        cur_lanes.swap(nxt_lanes);
+        cars.swap(tmp_cars);
+        std::fill(nxt_lanes.begin(), nxt_lanes.end(), -1);
+        
+        t++;
+        K += 2*N;
+    }
+
+    #ifdef DEBUG
+        reportFinalResult(cars);
     #endif
 }
