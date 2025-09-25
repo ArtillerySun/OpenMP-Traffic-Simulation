@@ -12,41 +12,29 @@
 namespace traffic_prng {
     extern PRNG* engine;
 }
-    // on the same lane, find the position of the immediately next car
-static inline int find_next(const std::vector<int>& lane, const int lane_num, const int L, int position) {
-    int offset = lane_num * L;
-    
+
+static inline int find_next_ptr(const int *lane_ptr, const int L, int position) {
     for (int i = position + 1; i < L; i++) {
-        if (lane[offset + i] != -1) {
-            return i;
-        }
+        if (lane_ptr[i] != -1) return i;
     }
     for (int i = 0; i < position; i++) {
-        if (lane[offset + i] != -1) {
-            return i;
-        }
+        if (lane_ptr[i] != -1) return i;
     }
     return -1;
 }
-static inline int find_prev(const std::vector<int>& lane, const int lane_num, const int L, int position) {
-    int offset = lane_num * L;
-
+static inline int find_prev_ptr(const int *lane_ptr, const int L, int position) {
     for (int i = position - 1; i >= 0; i--) {
-        if (lane[offset + i] != -1) {
-            return i;
-        }
+        if (lane_ptr[i] != -1) return i;
     }
     for (int i = L - 1; i > position; i--) {
-        if (lane[offset + i] != -1) {
-            return i;
-        }
+        if (lane_ptr[i] != -1) return i;
     }
     return -1;
 }
     // compute distance from 2 position on circular road
 static inline int dist(int L, int prev, int next) { 
     int d = next - prev; 
-    return d < 0 ? d + L : d; 
+    return d + (d < 0) * L; 
 }
 
 void executeSimulation(Params params, std::vector<Car> cars) {
@@ -100,9 +88,12 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 Car &new_c = tmp_cars[i];
 
                 int other_lane = c.lane ^ 1;
-                int p2 = find_next(cur_lanes, c.lane, L, c.position);
-                int p3 = find_next(cur_lanes, other_lane, L, c.position);
-                int p0 = find_prev(cur_lanes, other_lane, L, c.position);
+                const int *lane_ptr = cur_lanes.data() + c.lane * L;
+                const int *other_lane_ptr = cur_lanes.data() + other_lane * L;
+                int p2 = find_next_ptr(lane_ptr, L, c.position);
+                int p3 = find_next_ptr(other_lane_ptr, L, c.position);
+                int p0 = find_prev_ptr(other_lane_ptr, L, c.position);
+
 
                 int d2 = (p2 < 0) ? L : dist(L, c.position, p2);
                 int d3 = (p3 < 0) ? L : dist(L, c.position, p3);
@@ -139,7 +130,8 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 tmp_cars[i] = c;
                 Car &new_c = tmp_cars[i];
                 
-                int p2 = find_next(cur_lanes, c.lane, L, c.position);
+                const int *lane_ptr = cur_lanes.data() + c.lane * L;
+                int p2 = find_next_ptr(lane_ptr, L, c.position);
                 int d = (p2 < 0) ? L : dist(L, c.position, p2);
                 int v2 = (p2 < 0) ? VMAX : cars[cur_lanes[c.lane * L + p2]].v;
 
@@ -167,7 +159,7 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                         } else if (c.v >= v2 && c.v >= 2) {
                             new_c.v = std::min(d - 1, c.v - 2);
                         }
-                    } else if (c.v < d && d <= 2 * c.v && c.v >= v2) {
+                    } else if (d <= 2 * c.v && c.v >= v2) {
                         new_c.v = c.v - (c.v - v2) / 2;
                     } else {
                         new_c.v = std::min(d - 1, std::min(c.v + 1, VMAX));
