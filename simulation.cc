@@ -88,27 +88,6 @@ void accelerate(const std::vector<int>& lane, const int lane_num, const Car& c, 
     *speed_snapshot = std::min(d - 1, std::min(v1 + 1, VMAX));
 }
 
-// void position_update(std::vector<Car>& cars, std::vector<std::vector<int>>& lanes, const int L, const int N,
-//         const std::vector<int> speed_snapshot, std::vector<char>& dec1) {
-//     #pragma omp parallel for
-//     for (int i = 0; i < N; ++i) {
-//         // apply the random deceleration exactly once
-//         int v = speed_snapshot[i] - (dec1[i] ? 1 : 0);
-//         if (v < 0) v = 0;
-
-//         int new_position = (cars[i].position + v) % L;
-
-//         if (v > 0) {
-//             lanes[cars[i].lane][cars[i].position] = -1;
-//             lanes[cars[i].lane][new_position] = i;
-//         }
-
-//         cars[i].position = new_position;
-//         cars[i].v = v;
-//     }
-//     std::fill(dec1.begin(), dec1.end(), 0);
-// }
-
 void executeSimulation(Params params, std::vector<Car> cars) {
     const int N = params.n;
     const int L = params.L;
@@ -135,42 +114,57 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     reportResult(cars, 0);
     #endif
 
+    int num_threads = std::min(N, omp_get_max_threads());
     unsigned K = 0;
+
     while (t < T) {
         PRNG base = *traffic_prng::engine;
         
-        #pragma omp parallel 
+        #pragma omp parallel num_threads(num_threads)
         {
-            #pragma omp for schedule(static)
-            for (int i = 0; i < N; i++) {
+            int tid = omp_get_thread_num();
+            int chunk_size = (N + num_threads - 1) / num_threads;
+            int start = tid * chunk_size;
+            int end = std::min(N, start + chunk_size);
+
+            for (int i = start; i < end; i++) {
                 const Car &c = cars[i];
                 Car new_c = c;
+
                 if (can_switch_lane(cars, c, cur_lanes, L)) {
                     new_c.lane ^= 1;
                 }
+
                 nxt_lanes[new_c.lane * L + new_c.position] = new_c.id;
-                tmp_cars[new_c.id] = new_c;
+                tmp_cars[i] = new_c;
             }
+        }
+
+        cur_lanes.swap(nxt_lanes);
+        cars.swap(tmp_cars);
+        std::fill(nxt_lanes.begin(), nxt_lanes.end(), -1);
+
+        // std::cerr << "OK\n";
+
+        #pragma omp parallel num_threads(num_threads) 
+        {
             
-            #pragma omp single
-            {
-                cur_lanes.swap(nxt_lanes);
-                cars.swap(tmp_cars);
-                std::fill(nxt_lanes.begin(), nxt_lanes.end(), -1);
-            }
+            int tid = omp_get_thread_num();
+            int chunk_size = (N + num_threads - 1) / num_threads;
+            int start = tid * chunk_size;
+            int end = std::min(N, start + chunk_size);
 
+            PRNG e = base;
+            e.discard(K + 2 * start);
 
-            #pragma omp for schedule(static)
-            for (int i = 0; i < N; i++) {
+            for (int i = start; i < end; i++) {
                 Car &c = cars[i];
                 Car new_c = c;
-                PRNG e = base;
+                
 
                 bool if_acc = false;
                 int* cur_speed = &(new_c.v);
                 
-                // skip used rng
-                e.discard(K + 2 * i);
                 bool ss = flip_coin(P_START, &e);
                 bool dec = flip_coin(P_DEC, &e);
 
@@ -197,17 +191,16 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 }
 
                 new_c.position = (new_c.position + new_c.v) % L;
-                tmp_cars[new_c.id] = new_c;
+                tmp_cars[i] = new_c;
                 nxt_lanes[new_c.lane * L + new_c.position] = new_c.id;
             }
-
-            #pragma omp single
-            {
-                cur_lanes.swap(nxt_lanes);
-                cars.swap(tmp_cars);
-                std::fill(nxt_lanes.begin(), nxt_lanes.end(), -1);
-            }
         }
+
+
+        cur_lanes.swap(nxt_lanes);
+        cars.swap(tmp_cars);
+        std::fill(nxt_lanes.begin(), nxt_lanes.end(), -1);
+        
         t++;
         K += 2*N;
     }
