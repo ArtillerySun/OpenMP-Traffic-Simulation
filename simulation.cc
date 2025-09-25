@@ -1,4 +1,3 @@
-
 #include <assert.h>
 #include <omp.h>
 
@@ -8,102 +7,34 @@
 #include <vector>
 #include <math.h>
 #include "common.h"
+#include <cstring>
 
 namespace traffic_prng {
     extern PRNG* engine;
 }
-    // on the same lane, find the position of the immediately next car
-static inline int find_next(const std::vector<int>& lane, const int L, int position) {
-        // min 1 car next
-    for (int i = 1; i < L; i++) {
-            // mod to wrap back 
-        int wrapped_shifted = (position + i) % L;
-        if (lane[wrapped_shifted] != -1) {
-            return wrapped_shifted;
-        } 
+
+static inline int find_next_ptr(const int *lane_ptr, const int L, int position) {
+    for (int i = position + 1; i < L; i++) {
+        if (lane_ptr[i] != -1) return i;
     }
-    return -1; // not supposed to happen
+    for (int i = 0; i < position; i++) {
+        if (lane_ptr[i] != -1) return i;
+    }
+    return -1;
 }
-static inline int find_prev(const std::vector<int>& lane, const int L, int position) {
-    for (int i = 1; i < L; i++) {
-        int wrapped_shifted = (position - i + L) % L;
-        if (lane[wrapped_shifted] != -1) {
-            return wrapped_shifted;
-        } 
+static inline int find_prev_ptr(const int *lane_ptr, const int L, int position) {
+    for (int i = position - 1; i >= 0; i--) {
+        if (lane_ptr[i] != -1) return i;
     }
-    return -1; // not supposed to happen
+    for (int i = L - 1; i > position; i--) {
+        if (lane_ptr[i] != -1) return i;
+    }
+    return -1;
 }
     // compute distance from 2 position on circular road
 static inline int dist(int L, int prev, int next) { 
-    int d = (next - prev + L) % L; 
-    return d == 0 ? L : d; 
-}
-
-static inline int safe_dist_next(const std::vector<int>& lane, const int L, int position) {
-    int p = find_next(lane, L, position);
-    return (p < 0) ? L : dist(L, position, p);
-}
-
-bool can_switch_lane(const std::vector<Car>& cars, const Car& c, const std::vector<std::vector<int>>& lanes, const int L) {
-    int p2 = find_next(lanes[c.lane], L, c.position);
-    int p3 = find_next(lanes[c.lane^1], L, c.position);
-    int p0 = find_prev(lanes[c.lane^1], L, c.position);
-    int d2 = (p2 < 0) ? L : dist(L, c.position, p2);
-    int d0 = (p0 < 0) ? L : dist(L, p0, c.position);
-    int d3 = (p3 < 0) ? L : dist(L, c.position, p3);
-    return d2 < d3 && 
-            c.v >= d2 && 
-            lanes[c.lane^1][c.position] == -1 
-            && (d0 == L || d0 > cars[lanes[c.lane^1][p0]].v);
-}
-
-bool decelerate(const std::vector<Car>& cars,const std::vector<int>& lane, const Car& c, const int L, 
-        std::vector<int>& speed_snapshot, const int VMAX) {
-    int p2 = find_next(lane, L, c.position);
-    int d  = (p2 < 0) ? L : dist(L, c.position, p2);
-    int v2 = (p2 < 0) ? VMAX : cars[lane[p2]].v; 
-    int v1 = c.v;
-    if (d <= v1) {
-        if (v1 < v2 || v1 < 2) {
-            speed_snapshot[c.id] = d - 1;
-            return true;
-        } else if (v1 >= v2 && v1 >= 2) {
-            speed_snapshot[c.id] = std::min(d - 1, v1 - 2);
-            return true;
-        } else {
-            return false;
-        }
-    }
-    if (v1 < d && d <= 2 * v1 && v1 >= v2) {
-        speed_snapshot[c.id] = v1 - std::floor((v1 - v2) / 2);
-        return true;
-    }
-    return false;
-}
-
-void accelerate(const std::vector<int>& lane, const Car& c, const int L, 
-        std::vector<int>& speed_snapshot, const int& VMAX) {
-    int p2 = find_next(lane, L, c.position);
-    int d = (p2 < 0) ? L : dist(L, c.position, p2);
-    int v1 = c.v;
-    speed_snapshot[c.id] = std::min(d - 1, std::min(v1 + 1, VMAX));
-}
-
-void position_update(std::vector<Car>& cars, std::vector<std::vector<int>>& lanes, const int L, const int N,
-        const std::vector<int> speed_snapshot) {
-    for (int i = 0; i < N; i++) {
-            // compute new position
-        int new_position = (cars[i].position + speed_snapshot[i]) % L;
-            // update state vectors 
-                // lanes
-        if (speed_snapshot[i] > 0) {
-            lanes[cars[i].lane][cars[i].position] = -1;
-            lanes[cars[i].lane][new_position] = i;
-        }
-            // update car object 
-        cars[i].position = new_position;
-        cars[i].v = speed_snapshot[i];
-    }
+    int d = next - prev; 
+    return d + (d < 0) * L; 
 }
 
 void executeSimulation(Params params, std::vector<Car> cars) {
@@ -114,108 +45,147 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     const double P_START = params.p_start;
     const double P_DEC = params.p_dec;
     int t = 0;
-        // force accelerate state 
     std::vector<char> force_acc(N, 0);
-        // acceleration decision state
-    std::vector<char> accelerating(N, 0);
-        // can change lane decision state
-    std::vector<char> change_lane(N, 0);
-        // lanes and car position states
-    std::vector<std::vector<int>> lanes(2, std::vector(L, -1)); 
-        // centralized per iteration random decision making
-    std::vector<char> ss(N, 0);
-    std::vector<char> dec(N, 0);
-        // speed snapshot
-    std::vector<int> speed_snapshot(N, 0);
-        // build position and speed state vectors
+    std::vector<int> cur_lanes(2 * L, -1); 
+    std::vector<int> nxt_lanes(2 * L, -1); 
+
+    std::vector<Car> tmp_cars(N);
+
     for (auto c : cars) {
-        lanes[c.lane][c.position] = c.id;
-        speed_snapshot[c.id] = c.v;
+        cur_lanes[c.lane * L + c.position] = c.id;
     }
 
     #ifdef DEBUG
     reportResult(cars, 0);
     #endif
 
-    while (t < T) {
-            // Induce randomness
-            // need to skip partition size * idx when omp this to ensure deterministic rng to car correspondence
-        for (int i = 0; i < N; i++) {
-            ss[i] = flip_coin(P_START, traffic_prng::engine);
-            dec[i] = flip_coin(P_DEC, traffic_prng::engine);
-        }
-            // clear accelerating and change lane decision state
-        std::fill(change_lane.begin(), change_lane.end(), 0);
-        std::fill(accelerating.begin(), accelerating.end(), 0);
-            // update lane change decision state
-        for (auto c : cars) {
-            if (can_switch_lane(cars, c, lanes, L)) {
-                change_lane[c.id] = 1;
-            }
-        }
-            // apply change lane 
-        for (int i = 0; i < N; i++) {
-            if (change_lane[i]) {
-                Car& c = cars[i];
-                lanes[c.lane][c.position] = -1;
-                lanes[c.lane^1][c.position] = c.id;
-                c.lane ^= 1;
-            } else {
-                continue;
-            }
-        }
-            // car wise determine start/dec/acc
-            // slow start
-        for (auto c : cars) {
-            int d2 = safe_dist_next(lanes[c.lane], L, c.position);
-            if (c.v == 0 && d2 > 1) {   // satisfy slow start criteria
-                if (force_acc[c.id]) {  // did not accelerate when permitted last round
-                    force_acc[c.id] = 0;
-                    speed_snapshot[c.id] = 1;
-                    accelerating[c.id] = 0;
-                    continue;
-                } 
-                if (ss[c.id]) {         // random start
-                    accelerate(lanes[c.lane], c, L, speed_snapshot, VMAX);
-                    accelerating[c.id] = 1;
-                    continue;
-                } else {
-                    speed_snapshot[c.id] = 0;
-                    force_acc[c.id] = 1;
-                    continue;
-                }
-            } else {
-                continue;
-            }
+    int num_threads = std::min(N, omp_get_max_threads());
 
-        }
-            // deterministic deceleration & acceleration
-        for (auto c : cars) {
-            if (accelerating[c.id]) {  // only skip accel path for 1a
-                continue;
-            }
-                // allow deceleration even if there was a forced start this step
-            if (!decelerate(cars, lanes[c.lane], c, L, speed_snapshot, VMAX)) {
-                    // Only accelerate if this car was NOT set by forced start earlier:
-                if (!force_acc[c.id]) { // forced start already assigned v=1
-                    accelerate(lanes[c.lane], c, L, speed_snapshot, VMAX);
-                }
-            }
-        }
-            // random deceleration
-        for (auto c : cars) {
-            if (dec[c.id]) {
-                speed_snapshot[c.id] = std::max(0, speed_snapshot[c.id] - 1);
-            }
-        }
-        position_update(cars, lanes, L, N, speed_snapshot);
-        #ifdef DEBUG
-            reportResult(cars, t);
-        #endif
-        t++;
+    int chunk_size = (N + num_threads - 1) / num_threads;
+
+    std::vector<int> st(num_threads), ed(num_threads);
+
+    // #pragma omp parallel for
+    for (int i = 0; i < num_threads; i ++) {
+        st[i] = i * chunk_size;
+        ed[i] = std::min(N, st[i] + chunk_size);
     }
+
+    unsigned K = 0;
+
+    while (t < T) {
+        PRNG base = *traffic_prng::engine;
+        
+        #pragma omp parallel num_threads(num_threads)
+        {
+            int tid = omp_get_thread_num();
+            int start = st[tid];
+            int end = ed[tid];
+
+            for (int i = start; i < end; i++) {
+                const Car &c = cars[i];
+                tmp_cars[i] = c;
+                Car &new_c = tmp_cars[i];
+
+                int other_lane = c.lane ^ 1;
+                const int *lane_ptr = cur_lanes.data() + c.lane * L;
+                const int *other_lane_ptr = cur_lanes.data() + other_lane * L;
+                int p2 = find_next_ptr(lane_ptr, L, c.position);
+                int p3 = find_next_ptr(other_lane_ptr, L, c.position);
+                int p0 = find_prev_ptr(other_lane_ptr, L, c.position);
+
+
+                int d2 = (p2 < 0) ? L : dist(L, c.position, p2);
+                int d3 = (p3 < 0) ? L : dist(L, c.position, p3);
+                int d0 = (p0 < 0) ? L : dist(L, p0, c.position);
+                
+                if (d2 < d3 && 
+                    c.v >= d2 && 
+                    cur_lanes[other_lane * L + c.position] == -1 && 
+                    (p0 < 0 || d0 > cars[cur_lanes[other_lane * L + p0]].v)) 
+                {
+                    new_c.lane ^= 1;
+                }
+
+                nxt_lanes[new_c.lane * L + new_c.position] = new_c.id;
+            }
+        }
+
+        cur_lanes.swap(nxt_lanes);
+        cars.swap(tmp_cars);
+        std::memset(nxt_lanes.data(), 0xff, nxt_lanes.size() * sizeof(int));
+
+        #pragma omp parallel num_threads(num_threads) 
+        {
+            
+            int tid = omp_get_thread_num();
+            int start = st[tid];
+            int end = ed[tid];
+
+            PRNG e = base;
+            e.discard(K + 2 * start);
+
+            for (int i = start; i < end; i++) {
+                Car &c = cars[i];
+                tmp_cars[i] = c;
+                Car &new_c = tmp_cars[i];
+                
+                const int *lane_ptr = cur_lanes.data() + c.lane * L;
+                int p2 = find_next_ptr(lane_ptr, L, c.position);
+                int d = (p2 < 0) ? L : dist(L, c.position, p2);
+                int v2 = (p2 < 0) ? VMAX : cars[cur_lanes[c.lane * L + p2]].v;
+
+                bool if_acc = false;
+                
+                bool ss = flip_coin(P_START, &e);
+                bool dec = flip_coin(P_DEC, &e);
+
+                if (c.v == 0 && d > 1) {   // satisfy slow start criteria
+                    if (force_acc[c.id]) {  // did not accelerate when permitted last round
+                        force_acc[c.id] = 0;
+                        new_c.v = 1;
+                    } 
+                    else if (ss) {         // random start
+                        new_c.v = std::min(d - 1, std::min(c.v + 1, VMAX));
+                        if_acc = 1;
+                    } else {
+                        new_c.v = 0;
+                        force_acc[c.id] = 1;
+                    }
+                } else if (!if_acc && !force_acc[c.id]) {
+                    if (d <= c.v) {
+                        if (c.v < v2 || c.v < 2) {
+                            new_c.v = d - 1;
+                        } else if (c.v >= v2 && c.v >= 2) {
+                            new_c.v = std::min(d - 1, c.v - 2);
+                        }
+                    } else if (d <= 2 * c.v && c.v >= v2) {
+                        new_c.v = c.v - (c.v - v2) / 2;
+                    } else {
+                        new_c.v = std::min(d - 1, std::min(c.v + 1, VMAX));
+                    }
+                }
+
+                if (dec) {
+                    new_c.v = std::max(0, new_c.v - 1);
+                }
+
+                new_c.position = new_c.position + new_c.v;
+                new_c.position = new_c.position >= L ? new_c.position - L : new_c.position;
+                nxt_lanes[new_c.lane * L + new_c.position] = new_c.id;
+            }
+        }
+
+
+        cur_lanes.swap(nxt_lanes);
+        cars.swap(tmp_cars);
+        std::memset(nxt_lanes.data(), 0xff, nxt_lanes.size() * sizeof(int));
+        
+        t++;
+        K += 2*N;
+    }
+
     #ifdef DEBUG
         reportFinalResult(cars);
     #endif
 }
-
