@@ -18,37 +18,75 @@ static inline int find_next_bitmask(const std::vector<uint64_t>& bitmask, int la
     if (L <= 1) return -1;
 
     int offset = lane_num * L;
+    
+    if (position + 1 < L) { // pos + 1 to the end of the lane
+        int start_bit = offset + position + 1;
+        int start_word = start_bit / 64;
+        start_bit %= 64;
+        int end_word = (offset + L - 1) / 64;
+        int end_bit = (offset + L - 1) % 64;
 
-    int start_bit = offset + position + 1;
-    if (start_bit < offset + L) {
-        int word_idx = start_bit / 64;
-        uint64_t word = bitmask[word_idx] & (~0ULL << (start_bit % 64));
-
-        for (;;) {
-            if (word != 0) {
-                int found_pos = word_idx * 64 + __builtin_ctzll(word);
-                return (found_pos < offset + L) ? (found_pos - offset) : -1;
+        if (start_word == end_word) {
+            uint64_t word = bitmask[start_word] & (~0ULL << start_bit) & 
+            (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            if (word) {
+                return __builtin_ctzll(word) + start_word * 64 - offset;
             }
-            if (++word_idx >= (offset + L + 63) / 64) break;
-            word = bitmask[word_idx];
-        }
+        } else {
+            uint64_t word = bitmask[start_word] & (~0ULL << start_bit);
+            if (word) {
+                return __builtin_ctzll(word) + start_word * 64 - offset;
+            }
+
+            for (int idx = start_word + 1; idx < end_word; idx++) {
+                word = bitmask[idx];
+                if (word) {
+                    return __builtin_ctzll(word) + idx * 64 - offset;
+                }
+            }
+
+            word = bitmask[end_word] & (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            if (word) {
+                return __builtin_ctzll(word) + end_word * 64 - offset;
+            }
+        }  
     }
 
-    int end_bit = offset + position;
-    if (end_bit > offset) {
-        int word_idx = offset / 64;
-        uint64_t word = bitmask[word_idx];
+    if (position) { // 0 to pos - 1
+        int start_bit = offset;
+        int start_word = start_bit / 64;
+        start_bit %= 64;
 
-        for (;;) {
-            if (word != 0) {
-                int found_pos = word_idx * 64 + __builtin_ctzll(word);
-                return (found_pos < end_bit) ? (found_pos - offset) : -1;
+        int end_bit = offset + position - 1;
+        int end_word = end_bit / 64;
+        end_bit %= 64;
+
+        if (start_word == end_word) {
+            uint64_t word = bitmask[start_word] & (~0ULL << start_bit) & 
+            (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            if (word) {
+                return __builtin_ctzll(word) + start_word * 64 - offset;
             }
-            if (++word_idx >= (end_bit + 63) / 64) break;
-            word = bitmask[word_idx];
+        } else {
+            uint64_t word = bitmask[start_word] & (~0ULL << start_bit);
+            if (word) {
+                return __builtin_ctzll(word) + start_word * 64 - offset;
+            }
+
+            for (int idx = start_word + 1; idx < end_word; idx++) {
+                word = bitmask[idx];
+                if (word) {
+                    return __builtin_ctzll(word) + idx * 64 - offset;
+                }
+            }
+
+            word = bitmask[end_word] & (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            if (word) {
+                return __builtin_ctzll(word) + end_word * 64 - offset;
+            }
         }
     }
-
+    
     return -1;
 }
 
@@ -57,34 +95,73 @@ static inline int find_prev_bitmask(const std::vector<uint64_t>& bitmask, int la
 
     int offset = lane_num * L;
 
-    int start_bit = offset + position - 1;
-    if (start_bit >= offset) {
-        int word_idx = start_bit / 64;
-        uint64_t word = bitmask[word_idx] & (~0ULL >> (63 - (start_bit % 64)));
+    if (position) { // 0 to pos - 1
+        int start_bit = offset;
+        int start_word = start_bit / 64;
+        start_bit %= 64;
 
-        for (;;) {
-            if (word != 0) {
-                int found_pos = word_idx * 64 + (63 - __builtin_clzll(word));
-                return found_pos - offset;
+        int end_bit = offset + position - 1;
+        int end_word = end_bit / 64;
+        end_bit %= 64;
+
+        if (start_word == end_word) {
+            uint64_t word = bitmask[start_word] & (~0ULL << start_bit) & 
+            (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            if (word) {
+                return 63 - __builtin_clzll(word) + start_word * 64 - offset;
             }
-            if (--word_idx < offset / 64) break;
-            word = bitmask[word_idx];
+        } else {
+
+            uint64_t word = bitmask[end_word] & (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            if (word) {
+                return 63 - __builtin_clzll(word) + end_word * 64 - offset;
+            }
+
+            for (int idx = end_word - 1; idx > start_word; idx--) {
+                word = bitmask[idx];
+                if (word) {
+                    return 63 - __builtin_clzll(word) + idx * 64 - offset;
+                }
+            }
+
+            word = bitmask[start_word] & (~0ULL << start_bit);
+            if (word) {
+                return 63 - __builtin_clzll(word) + start_word * 64 - offset;
+            }
         }
     }
 
-    int end_bit = offset + position;
-    if (offset + L > end_bit) {
-        int word_idx = (offset + L - 1) / 64;
-        uint64_t word = bitmask[word_idx];
+    if (position + 1 < L) { // pos + 1 to the end of the lane
+        int start_bit = offset + position + 1;
+        int start_word = start_bit / 64;
+        start_bit %= 64;
+        int end_word = (offset + L - 1) / 64;
+        int end_bit = (offset + L - 1) % 64;
 
-        for (;;) {
-            if (word != 0) {
-                int found_pos = word_idx * 64 + (63 - __builtin_clzll(word));
-                if (found_pos >= end_bit) return found_pos - offset;
+        if (start_word == end_word) {
+            uint64_t word = bitmask[start_word] & (~0ULL << start_bit) & 
+            (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            if (word) {
+                return 63 - __builtin_clzll(word) + start_word * 64 - offset;
             }
-            if (--word_idx < end_bit / 64) break;
-            word = bitmask[word_idx];
-        }
+        } else {
+            uint64_t word = bitmask[end_word] & (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            if (word) {
+                return 63 - __builtin_clzll(word) + end_word * 64 - offset;
+            }
+            
+            for (int idx = end_word - 1; idx > start_word; idx--) {
+                word = bitmask[idx];
+                if (word) {
+                    return 63 - __builtin_clzll(word) + idx * 64 - offset;
+                }
+            }
+
+            word = bitmask[start_word] & (~0ULL << start_bit);
+            if (word) {
+                return 63 - __builtin_clzll(word) + start_word * 64 - offset;
+            }
+        }  
     }
 
     return -1;
@@ -168,8 +245,12 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 }
 
                 int offset = new_c.lane * L + new_c.position;
-                nxt_lanes[offset] = new_c.id;
-                nxt_lane_bitmask[offset / 64] |= (1ULL << (offset % 64));
+               
+                #pragma omp critical
+                {
+                    nxt_lanes[offset] = new_c.id;
+                    nxt_lane_bitmask[offset / 64] |= (1ULL << (offset % 64));
+                }
             }
         }
 
@@ -177,8 +258,8 @@ void executeSimulation(Params params, std::vector<Car> cars) {
         lane_bitmask.swap(nxt_lane_bitmask);
         cars.swap(tmp_cars);
 
-        std::memset(nxt_lane_bitmask.data(), 0xff, nxt_lane_bitmask.size() * sizeof(int));
-        std::memset(nxt_lanes.data(), 0xff, nxt_lanes.size() * sizeof(int));
+        std::fill(nxt_lane_bitmask.begin(), nxt_lane_bitmask.end(), 0ULL);
+        std::fill(nxt_lanes.begin(), nxt_lanes.end(), -1);
 
         #pragma omp parallel num_threads(num_threads)
         {
@@ -201,7 +282,7 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 bool ss = flip_coin(P_START, &e);
                 bool dec = flip_coin(P_DEC, &e);
 
-                if (c.v == 0 && d > 1) {  // 慢启动
+                if (c.v == 0 && d > 1) {  // slow start
                     if (force_acc[c.id]) {
                         force_acc[c.id] = 0;
                         new_c.v = 1;
@@ -233,8 +314,11 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 new_c.position = (new_c.position + new_c.v) % L;
 
                 int offset = new_c.lane * L + new_c.position;
-                nxt_lanes[offset] = new_c.id;
-                nxt_lane_bitmask[offset / 64] |= (1ULL << (offset % 64));
+                #pragma omp critical
+                {
+                    nxt_lanes[offset] = new_c.id;
+                    nxt_lane_bitmask[offset / 64] |= (1ULL << (offset % 64));
+                }
             }
         }
 
@@ -242,8 +326,8 @@ void executeSimulation(Params params, std::vector<Car> cars) {
         lane_bitmask.swap(nxt_lane_bitmask);
         cars.swap(tmp_cars);
 
-        std::memset(nxt_lane_bitmask.data(), 0xff, nxt_lane_bitmask.size() * sizeof(int));
-        std::memset(nxt_lanes.data(), 0xff, nxt_lanes.size() * sizeof(int));
+        std::fill(nxt_lane_bitmask.begin(), nxt_lane_bitmask.end(), 0ULL);
+        std::fill(nxt_lanes.begin(), nxt_lanes.end(), -1);
 
         t++;
         K += 2 * N;

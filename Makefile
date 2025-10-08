@@ -2,7 +2,7 @@ CXX := g++
 CXXFLAGS := -Wall -Wextra -Werror -pedantic -std=c++20 -fopenmp
 RELEASEFLAGS := -Ofast
 
-SRCS := simulation.cc common.cc
+SRCS := simulation_bitmask.cc common.cc
 HEADERS := common.h
 
 OBJS := $(SRCS:.cc=.o)
