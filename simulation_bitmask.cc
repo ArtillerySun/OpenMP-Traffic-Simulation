@@ -202,7 +202,7 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     }
 
     int num_threads = std::min(N, omp_get_max_threads());
-    int chunk_size = (N + num_threads - 1) / num_threads;
+    int chunk_size = std::min((N + num_threads - 1) / num_threads, 20);
 
     std::vector<int> st(num_threads), ed(num_threads);
     for (int i = 0; i < num_threads; i++) {
