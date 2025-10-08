@@ -201,10 +201,6 @@ void executeSimulation(Params params, std::vector<Car> cars) {
         lane_bitmask[offset / 64] |= (1ull << (offset % 64));
     }
 
-#ifdef DEBUG
-    reportResult(cars, 0);
-#endif
-
     int num_threads = std::min(N, omp_get_max_threads());
     int chunk_size = (N + num_threads - 1) / num_threads;
 
@@ -215,6 +211,7 @@ void executeSimulation(Params params, std::vector<Car> cars) {
     }
 
     while (t < T) {
+
         PRNG base = *traffic_prng::engine;
 
         #pragma omp parallel num_threads(num_threads)
@@ -246,11 +243,10 @@ void executeSimulation(Params params, std::vector<Car> cars) {
 
                 int offset = new_c.lane * L + new_c.position;
                
-                #pragma omp critical
-                {
-                    nxt_lanes[offset] = new_c.id;
-                    nxt_lane_bitmask[offset / 64] |= (1ULL << (offset % 64));
-                }
+                nxt_lanes[offset] = new_c.id;
+
+                #pragma omp atomic
+                nxt_lane_bitmask[offset / 64] |= (1ULL << (offset % 64));
             }
         }
 
@@ -314,11 +310,10 @@ void executeSimulation(Params params, std::vector<Car> cars) {
                 new_c.position = (new_c.position + new_c.v) % L;
 
                 int offset = new_c.lane * L + new_c.position;
-                #pragma omp critical
-                {
-                    nxt_lanes[offset] = new_c.id;
-                    nxt_lane_bitmask[offset / 64] |= (1ULL << (offset % 64));
-                }
+                nxt_lanes[offset] = new_c.id;
+
+                #pragma omp atomic
+                nxt_lane_bitmask[offset / 64] |= (1ULL << (offset % 64));
             }
         }
 
@@ -328,6 +323,11 @@ void executeSimulation(Params params, std::vector<Car> cars) {
 
         std::fill(nxt_lane_bitmask.begin(), nxt_lane_bitmask.end(), 0ULL);
         std::fill(nxt_lanes.begin(), nxt_lanes.end(), -1);
+
+
+        #ifdef DEBUG
+        reportResult(cars, t);
+        #endif
 
         t++;
         K += 2 * N;
