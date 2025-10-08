@@ -26,28 +26,16 @@ static inline int find_next_bitmask(const std::vector<uint64_t>& bitmask, int la
         int end_word = (offset + L - 1) / 64;
         int end_bit = (offset + L - 1) % 64;
 
-        if (start_word == end_word) {
-            uint64_t word = bitmask[start_word] & (~0ULL << start_bit) & 
-            (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
-            if (word) {
-                return __builtin_ctzll(word) + start_word * 64 - offset;
+        for (int idx = start_word; idx <= end_word; idx++) {
+            uint64_t word = bitmask[idx];
+            if (idx == start_word) {
+                word &= (~0ULL << start_bit);
             }
-        } else {
-            uint64_t word = bitmask[start_word] & (~0ULL << start_bit);
-            if (word) {
-                return __builtin_ctzll(word) + start_word * 64 - offset;
+            if (idx == end_word) {
+                word &= (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
             }
-
-            for (int idx = start_word + 1; idx < end_word; idx++) {
-                word = bitmask[idx];
-                if (word) {
-                    return __builtin_ctzll(word) + idx * 64 - offset;
-                }
-            }
-
-            word = bitmask[end_word] & (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
             if (word) {
-                return __builtin_ctzll(word) + end_word * 64 - offset;
+                return __builtin_ctzll(word) + idx * 64 - offset;
             }
         }  
     }
@@ -61,30 +49,18 @@ static inline int find_next_bitmask(const std::vector<uint64_t>& bitmask, int la
         int end_word = end_bit / 64;
         end_bit %= 64;
 
-        if (start_word == end_word) {
-            uint64_t word = bitmask[start_word] & (~0ULL << start_bit) & 
-            (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+        for (int idx = start_word; idx <= end_word; idx++) {
+            uint64_t word = bitmask[idx];
+            if (idx == start_word) {
+                word &= (~0ULL << start_bit);
+            }
+            if (idx == end_word) {
+                word &= (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            }
             if (word) {
-                return __builtin_ctzll(word) + start_word * 64 - offset;
+                return __builtin_ctzll(word) + idx * 64 - offset;
             }
-        } else {
-            uint64_t word = bitmask[start_word] & (~0ULL << start_bit);
-            if (word) {
-                return __builtin_ctzll(word) + start_word * 64 - offset;
-            }
-
-            for (int idx = start_word + 1; idx < end_word; idx++) {
-                word = bitmask[idx];
-                if (word) {
-                    return __builtin_ctzll(word) + idx * 64 - offset;
-                }
-            }
-
-            word = bitmask[end_word] & (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
-            if (word) {
-                return __builtin_ctzll(word) + end_word * 64 - offset;
-            }
-        }
+        } 
     }
     
     return -1;
@@ -104,31 +80,18 @@ static inline int find_prev_bitmask(const std::vector<uint64_t>& bitmask, int la
         int end_word = end_bit / 64;
         end_bit %= 64;
 
-        if (start_word == end_word) {
-            uint64_t word = bitmask[start_word] & (~0ULL << start_bit) & 
-            (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+        for (int idx = end_word; idx >= start_word; idx--) {
+            uint64_t word = bitmask[idx];
+            if (idx == start_word) {
+                word &= (~0ULL << start_bit);
+            }
+            if (idx == end_word) {
+                word &= (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            }
             if (word) {
-                return 63 - __builtin_clzll(word) + start_word * 64 - offset;
+                return 63 - __builtin_clzll(word) + idx * 64 - offset;
             }
-        } else {
-
-            uint64_t word = bitmask[end_word] & (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
-            if (word) {
-                return 63 - __builtin_clzll(word) + end_word * 64 - offset;
-            }
-
-            for (int idx = end_word - 1; idx > start_word; idx--) {
-                word = bitmask[idx];
-                if (word) {
-                    return 63 - __builtin_clzll(word) + idx * 64 - offset;
-                }
-            }
-
-            word = bitmask[start_word] & (~0ULL << start_bit);
-            if (word) {
-                return 63 - __builtin_clzll(word) + start_word * 64 - offset;
-            }
-        }
+        } 
     }
 
     if (position + 1 < L) { // pos + 1 to the end of the lane
@@ -138,30 +101,18 @@ static inline int find_prev_bitmask(const std::vector<uint64_t>& bitmask, int la
         int end_word = (offset + L - 1) / 64;
         int end_bit = (offset + L - 1) % 64;
 
-        if (start_word == end_word) {
-            uint64_t word = bitmask[start_word] & (~0ULL << start_bit) & 
-            (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+        for (int idx = end_word; idx >= start_word; idx--) {
+            uint64_t word = bitmask[idx];
+            if (idx == start_word) {
+                word &= (~0ULL << start_bit);
+            }
+            if (idx == end_word) {
+                word &= (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
+            }
             if (word) {
-                return 63 - __builtin_clzll(word) + start_word * 64 - offset;
+                return 63 - __builtin_clzll(word) + idx * 64 - offset;
             }
-        } else {
-            uint64_t word = bitmask[end_word] & (end_bit == 63 ? ~0ULL : ~(~0ULL << (end_bit + 1)));
-            if (word) {
-                return 63 - __builtin_clzll(word) + end_word * 64 - offset;
-            }
-            
-            for (int idx = end_word - 1; idx > start_word; idx--) {
-                word = bitmask[idx];
-                if (word) {
-                    return 63 - __builtin_clzll(word) + idx * 64 - offset;
-                }
-            }
-
-            word = bitmask[start_word] & (~0ULL << start_bit);
-            if (word) {
-                return 63 - __builtin_clzll(word) + start_word * 64 - offset;
-            }
-        }  
+        } 
     }
 
     return -1;
