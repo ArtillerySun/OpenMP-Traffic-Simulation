@@ -26,8 +26,8 @@ The achieved high CPU utilization confirms the program's efficiency in leveragin
 
 | Platform | Data Scale | Peak CPU Utilization | Note |
 | :--- | :--- | :--- | :--- |
-| **Xeon Server (xs-4114)** | $10^6$ | $\sim 1400%$ | High server core utilization |
-| **i7-13700 (Desktop)** | $10^6$ | $\sim 585%$ | Efficient desktop core utilization |
+| **Xeon Server (xs-4114)** | $10^6$ | $\sim 1400$%  | High server core utilization |
+| **i7-13700 (Desktop)** | $10^6$ | $\sim 585$%| Efficient desktop core utilization |
 
 ### Build Instructions
 
